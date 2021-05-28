@@ -5,9 +5,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-//トークナイザの導入
-//入力をトークン単位に分割
-
 //トークンの種類
 typedef enum{
     TK_RESERVED,    //記号
@@ -20,10 +17,9 @@ struct Token{
     Token *next;    //次の入力トークン
     int val;        //kindがTK_NUMの場合、その数値
     char *str;      //トークン文字列
+    int len;        //トークンの長さ
 };
 Token *token;       //現在注目しているトークン
-
-char *user_input;
 
 //抽象構文木のノードの種類
 typedef enum{
@@ -31,6 +27,10 @@ typedef enum{
     ND_SUB,     // -
     ND_MUL,     // *
     ND_DIV,     // /
+    ND_EQ,      // ==
+    ND_NE,      // !=
+    ND_LT,      // <
+    ND_LE,      // <=
     ND_NUM,     // num
 } NodeKind;
 //抽象構文木のノードの型
@@ -42,12 +42,18 @@ struct Node{
     int val;        // kindがND_NUMの場合のみ使用
 };
 
+char *user_input;
+
 //***プロトタイプ宣言***
-bool consume(char);
-void expect(char);
+bool consume(char *);
+void expect(char *);
 int expect_number();
 Node *expr();
+Node *equality();
+Node *relational();
+Node *add();
 Node *mul();
+Node *unary();
 Node *primary();
 //*********************
 
@@ -66,37 +72,81 @@ Node *new_node_num(int val){
     return node;
 }
 
-Node *expr(){           //EBNF expr = mul ( "+" mul | "-" mul )*
+Node *expr(){           //EBNF expr = equality
+    return equality();
+}
+
+Node *equality(){       //EBNF equality = relational ("==" relational | "!=" relational)*
+    Node *node = relational();
+
+    for(;;){
+        if(consume("=="))
+            node = new_node(ND_EQ, node, relational()); //**new_binary
+        else if(consume("!="))
+            node = new_node(ND_NE, node, relational()); //**
+        else
+            return node;
+    }
+}
+
+Node *relational(){     //EBNF relational = add ("<" add | "<=" add | ">" add | ">=" add)*
+    Node *node = add();
+
+    for(;;){
+        if(consume("<"))
+            node = new_node(ND_LT, node, add());
+        else if(consume("<="))
+            node = new_node(ND_LE, node, add());
+        else if(consume(">"))                           //両辺を入れ替える
+            node = new_node(ND_LT, add(), node);
+        else if(consume(">="))                          //両辺を入れ替える
+            node = new_node(ND_LE, add(), node);
+        else
+            return node;
+    }
+}
+
+Node *add(){            //EBNF add = mul ("+" mul | "-" mul)*
     Node *node = mul();
 
     for(;;){
-        if(consume('+'))
+        if(consume("+"))
             node = new_node(ND_ADD, node, mul());
-        else if(consume('-'))
+        else if(consume("-"))
             node = new_node(ND_SUB, node, mul());
         else
             return node;
     }
 }
 
-Node *mul(){            //EBNF mul = primary ( "*" primary | "/" primary )*
-    Node *node = primary();
+Node *mul(){            //EBNF mul = unary ("*" unary | "/" unary)*
+    Node *node = unary();
 
     for(;;){
-        if(consume('*'))
-            node = new_node(ND_MUL, node, primary());
-        else if(consume('/'))
-            node = new_node(ND_DIV, node, primary());
+        if(consume("*"))
+            node = new_node(ND_MUL, node, unary());
+        else if(consume("/"))
+            node = new_node(ND_DIV, node, unary());
         else
             return node;
     }
 }
 
-Node *primary(){
+Node *unary(){          //EBNF unary = ("+" | "-")? primary
+    if(consume("+"))
+        return primary();
+    if(consume("-"))
+        return new_node(ND_SUB, new_node_num(0), primary());
+
+    return primary();
+}
+
+Node *primary(){        //EBNF primary = num | "(" expr ")"
+
     //次のトークンが"("ならば、"(" expr ")"のはずである
-    if(consume('(')){
+    if(consume("(")){
         Node *node = expr();
-        expect(')');
+        expect(")");
         return node;
     }
 
@@ -128,8 +178,8 @@ void error(char *fmt, ...){     //"..." : 動的引数
 
 //次のトークンが期待している記号のときには、トークンを1つ読み進めて真を返す
 //それ以外の場合には偽を返す。
-bool consume(char op){
-    if(token->kind != TK_RESERVED || token->str[0] != op)
+bool consume(char *op){
+    if(token->kind != TK_RESERVED || strlen(op) != token->len || memcmp(token->str, op, token->len))
         return false;
     token = token->next;
     return true;
@@ -137,8 +187,8 @@ bool consume(char op){
 
 //次のトークンが期待している記号のときには、トークンを1つ読み進める
 //それ以外の場合にはエラーを報告する
-void expect(char op){
-    if(token->kind != TK_RESERVED || token->str[0] != op)
+void expect(char *op){
+    if(token->kind != TK_RESERVED || strlen(op) != token->len || memcmp(token->str, op, token->len))
         error("'%c'ではありません", op);
     token = token->next;
 }
@@ -157,11 +207,16 @@ bool at_eof(){
     return token->kind == TK_EOF;
 }
 
+bool startwith(char *p, char *q){
+    return memcmp(p, q, strlen(q)) == 0;    //byte(p) ＝ byte(q) ?
+}
+
 //新しいトークンを作成してcurにつなげる
-Token *new_token(TokenKind kind, Token *cur, char *str){
+Token *new_token(TokenKind kind, Token *cur, char *str, int len){
     Token *tok = calloc(1, sizeof(Token));  //heapからTokenサイズのバイトを1個確保し、0で初期化
     tok->kind = kind;
     tok->str = str;
+    tok->len = len;
     cur->next = tok;
     return tok;
 }
@@ -178,18 +233,27 @@ Token *tokenize(char *p){
             p++;
             continue;
         }
-        if(strchr("+-*/()", *p)){   //文字列の先頭から文字を検索する
-            cur = new_token(TK_RESERVED, cur, p++);
+        //2文字の演算子を検索
+        if(startwith(p, "==") || startwith(p, "!=") || startwith(p, "<=") || startwith(p, ">=")){
+            cur = new_token(TK_RESERVED, cur, p, 2);
+            p += 2;
+            continue;
+        }
+        //1文字の演算子を検索
+        if(strchr("+-*/()<>", *p)){
+            cur = new_token(TK_RESERVED, cur, p++, 1);
             continue;
         }
         if(isdigit(*p)){
-            cur = new_token(TK_NUM, cur, p);
-            cur->val = strtol(p, &p, 10);
+            cur = new_token(TK_NUM, cur, p, 0);
+            char *q = p;
+            cur->val = strtol(p, &p, 10);   //10進のlong型へ変換
+            cur->len = p - q;               //??
             continue;
         }
         error("トークナイズできません\n");
     }
-    new_token(TK_EOF, cur, p);
+    new_token(TK_EOF, cur, p, 0);
     return head.next;
 }
 
@@ -219,6 +283,26 @@ void gen(Node *node){
         case ND_DIV:
             printf("  cqo\n");
             printf("  idiv rdi\n");
+            break;
+        case ND_EQ:
+            printf("  cmp rax, rdi\n");
+            printf("  sete al\n");
+            printf("  movzb rax, al\n");
+            break;
+        case ND_NE:
+            printf("  cmp rax, rdi\n");
+            printf("  setne al\n");
+            printf("  movzb rax, al\n");
+            break;
+        case ND_LT:
+            printf("  cmp rax, rdi\n");
+            printf("  setl al\n");
+            printf("  movzb rax, al\n");
+            break;
+        case ND_LE:
+            printf("  cmp rax, rdi\n");
+            printf("  setle al\n");
+            printf("  movzb rax, al\n");
             break;
     }
     printf("  push rax\n");
