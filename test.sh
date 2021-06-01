@@ -40,4 +40,4 @@ assert 1  "11 > 9"
 assert 0  "10 >= 42"
 assert 1  "1 >= 1"
 
-echo OK
+echo "test case passed"
